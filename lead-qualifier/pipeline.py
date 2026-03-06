@@ -42,7 +42,7 @@ from ai.brand_matcher import BrandMatcher, MATCH_ERROR
 # ============================================================================
 
 TIMEOUT = 15
-CONNECT_TIMEOUT = 5
+CONNECT_TIMEOUT = 10
 MAX_RESPONSE_BYTES = 2_000_000  # 2 MB
 SCRAPE_CONCURRENCY = 500
 SCRAPE_PHASE_TIMEOUT = 600  # 10 min overall scrape phase cap
@@ -272,6 +272,8 @@ async def scrape_domain(session: aiohttp.ClientSession, domain: str, semaphore: 
                     result["scrape_error"] = "connection_error"
                 else:
                     result["scrape_error"] = err_str
+            except Exception as e:
+                result["scrape_error"] = str(e)[:100]
 
             if attempt < MAX_RETRIES - 1:
                 delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
