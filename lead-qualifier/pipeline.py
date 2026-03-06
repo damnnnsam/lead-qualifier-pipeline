@@ -24,7 +24,7 @@ import re
 import threading
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from aiohttp_socks import ProxyConnector
+from aiohttp_socks import ProxyConnector, ProxyConnectionError, ProxyTimeoutError
 from bs4 import BeautifulSoup
 from datetime import datetime
 from pathlib import Path
@@ -44,7 +44,7 @@ from ai.brand_matcher import BrandMatcher, MATCH_ERROR
 TIMEOUT = 15
 CONNECT_TIMEOUT = 10
 MAX_RESPONSE_BYTES = 2_000_000  # 2 MB
-SCRAPE_CONCURRENCY = 500
+SCRAPE_CONCURRENCY = int(os.getenv("SCRAPE_CONCURRENCY", "50"))
 SCRAPE_PHASE_TIMEOUT = 600  # 10 min overall scrape phase cap
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 0.5
@@ -192,6 +192,21 @@ def pre_classify(domains: List[dict], log_file: Path) -> tuple:
 # PHASE 1: SCRAPE WEBSITES
 # ============================================================================
 
+def _extract_brd_error(response) -> str | None:
+    """Extract BrightData proxy error details from response headers."""
+    brd_code = response.headers.get("x-brd-err-code") or response.headers.get("x-brd-error")
+    brd_msg = response.headers.get("x-brd-err-msg", "")
+    proxy_status = response.headers.get("Proxy-Status", "")
+    parts = []
+    if brd_code:
+        parts.append(f"brd_{brd_code}")
+    if brd_msg:
+        parts.append(brd_msg[:80])
+    if proxy_status and not brd_code:
+        parts.append(f"proxy_status:{proxy_status[:80]}")
+    return "; ".join(parts) if parts else None
+
+
 async def scrape_domain(session: aiohttp.ClientSession, domain: str, semaphore: asyncio.Semaphore) -> dict:
     url = f"https://{domain}"
     result = {
@@ -209,6 +224,7 @@ async def scrape_domain(session: aiohttp.ClientSession, domain: str, semaphore: 
         "has_prices": False,
         "scrape_attempts": 0,
         "scrape_error": None,
+        "brd_error": None,
         "scraped_at": None,
     }
 
@@ -224,6 +240,10 @@ async def scrape_domain(session: aiohttp.ClientSession, domain: str, semaphore: 
                     result["status_code"] = response.status
                     result["final_url"] = str(response.url)
 
+                    brd_err = _extract_brd_error(response)
+                    if brd_err:
+                        result["brd_error"] = brd_err
+
                     if response.status == 200:
                         raw = await response.content.read(MAX_RESPONSE_BYTES)
                         html = raw.decode("utf-8", errors="replace")
@@ -237,12 +257,54 @@ async def scrape_domain(session: aiohttp.ClientSession, domain: str, semaphore: 
                         meta = soup.find("meta", attrs={"name": "description"})
                         result["meta_description"] = meta.get("content", "").strip()[:500] if meta else None
 
+                        # OG tags as fallback for JS-rendered sites
+                        if not result["title"]:
+                            og_title = soup.find("meta", attrs={"property": "og:title"})
+                            if og_title:
+                                result["title"] = (og_title.get("content") or "").strip()[:200]
+                        if not result["meta_description"]:
+                            og_desc = soup.find("meta", attrs={"property": "og:description"})
+                            if og_desc:
+                                result["meta_description"] = (og_desc.get("content") or "").strip()[:500]
+
                         body = soup.find("body")
                         if body:
                             text = body.get_text(separator=" ", strip=True)[:5000]
                             result["body_text"] = re.sub(r'\s+', ' ', text)
 
+                        # JSON-LD structured data (often present on JS-rendered sites)
+                        jsonld_texts = []
+                        for script in soup.find_all("script", type="application/ld+json"):
+                            try:
+                                ld = json.loads(script.string or "")
+                                items = ld if isinstance(ld, list) else [ld]
+                                for item in items:
+                                    t = item.get("@type", "")
+                                    if isinstance(t, list):
+                                        t = ", ".join(t)
+                                    name = item.get("name", "")
+                                    desc = item.get("description", "")[:200]
+                                    if name or desc:
+                                        jsonld_texts.append(f"{t}: {name} - {desc}".strip(" -"))
+                            except (json.JSONDecodeError, TypeError, AttributeError):
+                                pass
+                        if jsonld_texts:
+                            result["structured_data"] = " | ".join(jsonld_texts[:5])
+
+                        # Detect ecommerce platform from HTML signals
                         html_lower = html.lower()
+                        detected = []
+                        if "shopify" in html_lower or soup.find("meta", attrs={"name": "shopify-checkout-api-token"}):
+                            detected.append("shopify")
+                        if "woocommerce" in html_lower or "wc-block" in html_lower:
+                            detected.append("woocommerce")
+                        if "bigcommerce" in html_lower:
+                            detected.append("bigcommerce")
+                        if "magento" in html_lower:
+                            detected.append("magento")
+                        if detected:
+                            result["detected_platform"] = ", ".join(detected)
+
                         result["has_cart"] = any(x in html_lower for x in ["/cart", "cart-icon", "shopping-cart", "minicart"])
                         result["has_checkout"] = any(x in html_lower for x in ["/checkout", "checkout-button"])
                         result["has_add_to_cart"] = any(x in html_lower for x in ["add-to-cart", "addtocart", "add to cart"])
@@ -252,11 +314,16 @@ async def scrape_domain(session: aiohttp.ClientSession, domain: str, semaphore: 
                         result["scraped_at"] = datetime.now().isoformat()
                         return result
                     elif response.status == 403:
-                        result["scrape_error"] = "blocked"
+                        if brd_err:
+                            result["scrape_error"] = f"proxy_blocked: {brd_err}"
+                        else:
+                            result["scrape_error"] = "blocked"
                         result["scraped_at"] = datetime.now().isoformat()
                         return result
-                    elif response.status >= 500:
-                        result["scrape_error"] = f"server_error_{response.status}"
+                    elif response.status == 429 or response.status >= 500:
+                        result["scrape_error"] = f"http_{response.status}"
+                        if brd_err:
+                            result["scrape_error"] += f" ({brd_err})"
                     else:
                         result["scrape_error"] = f"http_{response.status}"
                         result["scraped_at"] = datetime.now().isoformat()
@@ -264,6 +331,8 @@ async def scrape_domain(session: aiohttp.ClientSession, domain: str, semaphore: 
 
             except asyncio.TimeoutError:
                 result["scrape_error"] = "timeout"
+            except (ProxyConnectionError, ProxyTimeoutError) as e:
+                result["scrape_error"] = f"proxy_error: {str(e)[:80]}"
             except (aiohttp.ClientConnectorError, aiohttp.ClientError, OSError) as e:
                 err_str = str(e)[:100]
                 if "ssl" in err_str.lower():
@@ -333,6 +402,21 @@ async def scrape_all(domains_or_metas: List, log_file: Path) -> List[dict]:
         except asyncio.TimeoutError:
             log(f"  Scrape phase timed out after {SCRAPE_PHASE_TIMEOUT}s — returning {len(results)}/{len(domain_list)} scraped so far", log_file)
 
+    scraped_domains = {r["domain"] for r in results}
+    for domain in domain_list:
+        if domain not in scraped_domains:
+            missed = {
+                "domain": domain,
+                "is_online": False,
+                "scrape_error": "phase_timeout",
+                "scraped_at": datetime.now().isoformat(),
+            }
+            if domain in meta_lookup:
+                for k, v in meta_lookup[domain].items():
+                    if k not in missed or missed[k] is None:
+                        missed[k] = v
+            results.append(missed)
+
     return results
 
 
@@ -349,13 +433,34 @@ def classify_batch(scraped_data: List[dict], log_file: Path) -> List[dict]:
 
     log(f"Classifying {len(online)} online sites ({LLM_CONCURRENCY} concurrent)...", log_file)
 
+    error_counts = {}
     for d in offline:
-        d["business_type"] = "not_ecommerce"
-        d["classification_confidence"] = 1
-        d["classification_description"] = f"Offline: {d.get('scrape_error', 'unknown')}"
+        err = d.get("scrape_error", "unknown")
+        brd = d.get("brd_error", "")
+        error_key = err.split("(")[0].strip() if err else "unknown"
+        error_counts[error_key] = error_counts.get(error_key, 0) + 1
+
+        is_proxy_issue = (
+            "proxy" in err.lower()
+            or bool(brd)
+            or err in ("http_429", "timeout", "connection_error")
+        )
+        if is_proxy_issue:
+            d["business_type"] = "scrape_failed"
+        else:
+            d["business_type"] = "offline"
+        d["classification_confidence"] = 0
+        desc = f"Scrape failed: {err}"
+        if brd:
+            desc += f" | BRD: {brd}"
+        d["classification_description"] = desc
         d["classification_category"] = None
         d["classified_at"] = datetime.now().isoformat()
         d["classification_source"] = "offline"
+
+    if error_counts:
+        err_summary = ", ".join(f"{k}: {v}" for k, v in sorted(error_counts.items(), key=lambda x: -x[1]))
+        log(f"  Scrape errors: {err_summary}", log_file)
 
     semaphore = threading.Semaphore(LLM_CONCURRENCY)
 
@@ -392,8 +497,13 @@ def classify_batch(scraped_data: List[dict], log_file: Path) -> List[dict]:
         if data.get("has_checkout"): signals.append("checkout")
         if data.get("has_add_to_cart"): signals.append("add-to-cart")
         if data.get("has_prices"): signals.append("prices")
+        if data.get("detected_platform"):
+            signals.append(f"platform: {data['detected_platform']}")
         if signals:
             parts.append(f"Ecommerce signals detected: {', '.join(signals)}")
+
+        if data.get("structured_data"):
+            parts.append(f"Structured data (JSON-LD): {data['structured_data'][:500]}")
 
         if data.get("body_text"):
             parts.append(f"Page Content:\n{data['body_text'][:2000]}")
@@ -460,8 +570,12 @@ Respond with JSON only:
         return None
 
     def classify_one(data: dict) -> dict:
-        if (not data.get("title") and not data.get("body_text")
-                and not data.get("description") and not data.get("meta_description")):
+        has_any_content = (
+            data.get("title") or data.get("body_text")
+            or data.get("description") or data.get("meta_description")
+            or data.get("structured_data") or data.get("detected_platform")
+        )
+        if not has_any_content:
             data["business_type"] = "not_ecommerce"
             data["classification_confidence"] = 1
             data["classification_description"] = "No content to classify"

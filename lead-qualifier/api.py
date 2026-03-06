@@ -41,8 +41,8 @@ jobs: dict = {}
 jobs_lock = threading.Lock()
 
 RESULT_FIELDS = [
-    "domain", "title", "business_type", "amazon_status",
-    "classification_category", "classification_description",
+    "domain", "title", "business_type", "is_online", "scrape_error", "brd_error",
+    "amazon_status", "classification_category", "classification_description",
     "amazon_store_url", "amazon_seller_name", "amazon_confidence",
     "amazon_confidence_reason", "amazon_checked_at",
 ]
