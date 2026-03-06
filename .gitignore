@@ -1,0 +1,31 @@
+# Secrets
+.env
+
+# Source data
+storeleads_dump.sql.gz
+
+# Generated batch files, results, and logs
+domains_*.json
+domains_*.csv
+results_*.jsonl
+results_*.csv
+*.csv
+batch*_log.txt
+
+# A/B test artifacts
+ab_test/
+ab_test_*.json
+ab_test_*.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE / OS
+.cursor/
+.DS_Store
+.vscode/
+*.swp

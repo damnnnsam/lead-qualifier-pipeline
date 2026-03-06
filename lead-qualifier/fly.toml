@@ -1,0 +1,36 @@
+# Pipeline API — Fly.io app (run: fly launch to create app, then fly deploy)
+# Scale-to-zero: machine stops when idle, starts on request.
+
+app = "lead-qualifier-pipeline"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  LLM_CONCURRENCY = "500"
+  MAX_CONCURRENT_JOBS = "16"
+  PYTHONUNBUFFERED = "1"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 500
+    hard_limit = 1000
+
+  [[http_service.checks]]
+    grace_period = "60s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/"
+
+[vm]
+  size = "performance-8x"
+  memory = "32gb"
