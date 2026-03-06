@@ -130,6 +130,7 @@ Each line in the results JSONL file:
   "brd_error": null,
   "classification_category": "Pet Supplies",
   "classification_description": "Online pet supply store selling food, toys, and accessories",
+  "niche": "premium pet food & accessories",
   "amazon_status": "on_amazon",
   "amazon_store_url": "https://www.amazon.com/stores/Example/page/...",
   "amazon_seller_name": "Example Pet Co",
