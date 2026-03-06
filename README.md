@@ -2,7 +2,7 @@
 
 Company enrichment pipeline that takes domains (with optional StoreLeads metadata) and determines:
 
-1. Whether the business is ecommerce (pre-classification + LLM classification)
+1. Whether the business is ecommerce (LLM classification from scraped content)
 2. Whether the business sells on Amazon (Serper SERP search + LLM brand matching)
 
 Output: qualified lead list with domain, business type, Amazon store URL, seller name, and confidence score.
@@ -17,8 +17,7 @@ FastAPI API (lead-qualifier/api.py) ── deployed on Fly.io as "lead-qualifier
  │
  ▼
 Pipeline (lead-qualifier/pipeline.py)
- ├── Phase 0: Pre-classify using StoreLeads metadata (skip obvious non-ecom)
- ├── Phase 1: Scrape via BrightData datacenter proxy (50 concurrent, configurable)
+ ├── Phase 1: Scrape all domains via BrightData datacenter proxy (50 concurrent)
  ├── Phase 2: Classify with DeepSeek LLM (enriched prompt w/ metadata + OG/JSON-LD)
  └── Phase 3: Amazon presence check (Serper SERP + DeepSeek brand matching)
 ```
@@ -170,7 +169,7 @@ Returns `{"job_id": "abc123", "domain_count": 2, "status": "running"}`.
 
 ## Pipeline Details
 
-- **Pre-classification** uses StoreLeads platform, categories, and product count to skip obvious non-ecom (news, government, education, etc.) without scraping or LLM calls. Never auto-classifies *as* ecommerce — all potential ecom sites go through full LLM classification.
+- **Every domain gets the full pipeline** — no pre-filtering. This ensures every domain gets an AI-generated niche and description for email personalization, plus an Amazon check. StoreLeads metadata is passed to the LLM as supplementary context, not used to skip domains.
 - **Scraping** uses aiohttp through BrightData datacenter proxy (50 concurrent, configurable via `SCRAPE_CONCURRENCY`). 3 retries with exponential backoff. Response size capped at 2 MB, overall phase timeout of 10 minutes. Retries on HTTP 429 and 5xx.
 - **JS-rendered site handling**: For sites that return empty body text (SPAs, Shopify Hydrogen, etc.), the scraper extracts OG meta tags (`og:title`, `og:description`), JSON-LD structured data, and detects ecommerce platforms (Shopify, WooCommerce, BigCommerce, Magento) from HTML signals. This recovers ~75% of otherwise-unclassifiable JS-rendered sites.
 - **LLM classification** sends scraped content + StoreLeads metadata + structured data to DeepSeek. Classifies into 13 business types. Includes retry with exponential backoff on rate limits, 30s timeout per call.

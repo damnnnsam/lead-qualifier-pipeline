@@ -752,34 +752,22 @@ def run_pipeline_from_api(
         if progress_cb:
             progress_cb(msg)
 
-    # Phase 0: Filter obvious non-ecommerce (news, government, etc.)
-    _progress(f"Phase 0: Pre-classifying {total} domains...")
-    needs_llm, filtered_out = pre_classify(domain_metas, log_file)
+    # Phase 1: Scrape all domains
+    _progress(f"Phase 1: Scraping {total} domains...")
+    scraped = asyncio.run(scrape_all(domain_metas, log_file))
+    online = sum(1 for s in scraped if s.get("is_online"))
+    log(f"Scrape complete: {online}/{len(scraped)} online", log_file)
 
-    # Phase 1: Scrape domains that need classification
-    if needs_llm:
-        _progress(f"Phase 1: Scraping {len(needs_llm)} domains...")
-        scraped = asyncio.run(scrape_all(needs_llm, log_file))
-        online = sum(1 for s in scraped if s.get("is_online"))
-        log(f"Scrape complete: {online}/{len(scraped)} online", log_file)
-    else:
-        scraped = []
-
-    # Phase 2: Classify ALL scraped domains with LLM — no auto-classification
-    if scraped:
-        online_count = sum(1 for s in scraped if s.get("is_online"))
-        _progress(f"Phase 2: Classifying {online_count} online domains with LLM...")
-        classified = classify_batch(scraped, log_file)
-        ecommerce = [d for d in classified if d.get("business_type") == "ecommerce"]
-        not_ecommerce = [d for d in classified if d.get("business_type") != "ecommerce"]
-    else:
-        ecommerce = []
-        not_ecommerce = []
+    # Phase 2: Classify all scraped domains with LLM
+    online_count = sum(1 for s in scraped if s.get("is_online"))
+    _progress(f"Phase 2: Classifying {online_count} online domains with LLM...")
+    classified = classify_batch(scraped, log_file)
+    ecommerce = [d for d in classified if d.get("business_type") == "ecommerce"]
+    not_ecommerce = [d for d in classified if d.get("business_type") != "ecommerce"]
 
     log(
         f"Classification: {len(ecommerce)} ecommerce, "
-        f"{len(not_ecommerce)} not ecom, "
-        f"{len(filtered_out)} pre-filtered.",
+        f"{len(not_ecommerce)} not ecom.",
         log_file,
     )
 
@@ -791,13 +779,12 @@ def run_pipeline_from_api(
     on_amazon = sum(1 for d in ecommerce if d.get("amazon_status") == "on_amazon")
     ecom_only = sum(1 for d in ecommerce if d.get("amazon_status") == "ecom_only")
 
-    all_results = ecommerce + not_ecommerce + filtered_out
+    all_results = ecommerce + not_ecommerce
     elapsed = time.time() - start_time
     summary = {
         "input_domains": total,
-        "filtered_non_ecom": len(filtered_out),
         "scraped": len(scraped),
-        "online": sum(1 for s in scraped if s.get("is_online")) if scraped else 0,
+        "online": online,
         "ecommerce": len(ecommerce),
         "not_ecommerce": len(not_ecommerce),
         "on_amazon": on_amazon,

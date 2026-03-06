@@ -3,7 +3,7 @@
 ## What this is
 
 A REST API (FastAPI on Fly.io) that takes a list of domains and returns:
-- **Business classification**: ecommerce, software, agency, services, b2b, etc.
+- **Business classification**: ecommerce, software, agency, services, b2b, etc. (every domain gets scraped + LLM classified, no pre-filtering)
 - **Niche identification**: a specific 2-6 word niche for email personalization (e.g. "premium organic baby skincare")
 - **Amazon presence**: whether the brand sells on Amazon, with store URL and confidence score
 
