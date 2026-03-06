@@ -42,15 +42,18 @@ from ai.brand_matcher import BrandMatcher, MATCH_ERROR
 # ============================================================================
 
 TIMEOUT = 15
+CONNECT_TIMEOUT = 5
+MAX_RESPONSE_BYTES = 2_000_000  # 2 MB
 SCRAPE_CONCURRENCY = 500
+SCRAPE_PHASE_TIMEOUT = 600  # 10 min overall scrape phase cap
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 0.5
 
-LLM_MODEL = resolve_llm_model("claude-sonnet-4-20250514")
-LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "500"))
+LLM_MODEL = resolve_llm_model()
+LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "50"))
 
 SERP_PARALLEL = 40
-LLM_MATCH_PARALLEL = int(os.getenv("LLM_CONCURRENCY", "500"))
+LLM_MATCH_PARALLEL = LLM_CONCURRENCY
 
 PROXY = os.getenv("BRIGHTDATA_PROXY") or os.getenv("BRIGHTDATA_PROXY_URL")
 
@@ -213,17 +216,23 @@ async def scrape_domain(session: aiohttp.ClientSession, domain: str, semaphore: 
         for attempt in range(MAX_RETRIES):
             result["scrape_attempts"] = attempt + 1
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=TIMEOUT),
+                timeout = aiohttp.ClientTimeout(
+                    total=TIMEOUT, sock_connect=CONNECT_TIMEOUT,
+                )
+                async with session.get(url, timeout=timeout,
                                        allow_redirects=True, ssl=False) as response:
                     result["status_code"] = response.status
                     result["final_url"] = str(response.url)
 
                     if response.status == 200:
-                        html = await response.text()
+                        raw = await response.content.read(MAX_RESPONSE_BYTES)
+                        html = raw.decode("utf-8", errors="replace")
                         soup = BeautifulSoup(html, "html.parser")
 
                         result["is_online"] = True
-                        result["title"] = soup.title.string.strip() if soup.title and soup.title.string else None
+                        result["title"] = (
+                            soup.title.get_text(strip=True) if soup.title else None
+                        )
 
                         meta = soup.find("meta", attrs={"name": "description"})
                         result["meta_description"] = meta.get("content", "").strip()[:500] if meta else None
@@ -255,13 +264,14 @@ async def scrape_domain(session: aiohttp.ClientSession, domain: str, semaphore: 
 
             except asyncio.TimeoutError:
                 result["scrape_error"] = "timeout"
-            except aiohttp.ClientConnectorError:
-                result["scrape_error"] = "connection_error"
-            except aiohttp.ClientError as e:
+            except (aiohttp.ClientConnectorError, aiohttp.ClientError, OSError) as e:
                 err_str = str(e)[:100]
-                result["scrape_error"] = "ssl_error" if "ssl" in err_str.lower() else err_str
-            except Exception as e:
-                result["scrape_error"] = str(e)[:100]
+                if "ssl" in err_str.lower():
+                    result["scrape_error"] = "ssl_error"
+                elif isinstance(e, aiohttp.ClientConnectorError):
+                    result["scrape_error"] = "connection_error"
+                else:
+                    result["scrape_error"] = err_str
 
             if attempt < MAX_RETRIES - 1:
                 delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
@@ -313,7 +323,13 @@ async def scrape_all(domains_or_metas: List, log_file: Path) -> List[dict]:
 
     async with aiohttp.ClientSession(connector=connector, headers=HEADERS) as session:
         tasks = [scrape_and_collect(d) for d in domain_list]
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks),
+                timeout=SCRAPE_PHASE_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            log(f"  Scrape phase timed out after {SCRAPE_PHASE_TIMEOUT}s — returning {len(results)}/{len(domain_list)} scraped so far", log_file)
 
     return results
 
@@ -426,6 +442,21 @@ IMPORTANT RULES:
 Respond with JSON only:
 {{"business_type": "x", "confidence": 1-3, "description": "one sentence about what this business does", "category": "product category if ecommerce, otherwise null"}}"""
 
+    def _extract_json(text: str) -> dict | None:
+        """Extract JSON from LLM response, handling markdown fences and nested objects."""
+        cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
+        try:
+            return json.loads(cleaned)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        match = re.search(r'\{[\s\S]*\}', cleaned)
+        if match:
+            try:
+                return json.loads(match.group())
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return None
+
     def classify_one(data: dict) -> dict:
         if (not data.get("title") and not data.get("body_text")
                 and not data.get("description") and not data.get("meta_description")):
@@ -437,38 +468,48 @@ Respond with JSON only:
             data["classification_source"] = "no_content"
             return data
 
-        with semaphore:
-            prompt = build_prompt(data)
-            try:
-                response = client.messages.create(
-                    model=LLM_MODEL,
-                    max_tokens=400,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                content = response.content[0].text
+        prompt = build_prompt(data)
+        max_retries = 3
 
-                json_match = re.search(r'\{[^{}]*\}', content, re.DOTALL)
-                if json_match:
-                    result = json.loads(json_match.group())
-                    data["business_type"] = result.get("business_type", "other")
-                    data["classification_confidence"] = result.get("confidence", 1)
-                    data["classification_description"] = result.get("description", "")
-                    data["classification_category"] = result.get("category", "")
+        for attempt in range(max_retries):
+            try:
+                with semaphore:
+                    response = client.messages.create(
+                        model=LLM_MODEL,
+                        max_tokens=400,
+                        timeout=30,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                content = response.content[0].text
+                parsed = _extract_json(content)
+
+                if parsed:
+                    data["business_type"] = parsed.get("business_type", "other")
+                    data["classification_confidence"] = parsed.get("confidence", 1)
+                    data["classification_description"] = parsed.get("description", "")
+                    data["classification_category"] = parsed.get("category", "")
                 else:
                     data["business_type"] = "other"
                     data["classification_confidence"] = 1
                     data["classification_description"] = f"Parse failed: {content[:100]}"
+                break
 
             except Exception as e:
+                error_str = str(e)
+                is_rate_limit = "429" in error_str or "rate_limit" in error_str.lower()
+                if attempt < max_retries - 1:
+                    wait = (2 ** (attempt + 1)) if is_rate_limit else 1
+                    time.sleep(wait)
+                    continue
                 data["business_type"] = "other"
                 data["classification_confidence"] = 1
-                data["classification_description"] = f"Error: {str(e)[:100]}"
+                data["classification_description"] = f"Error: {error_str[:100]}"
 
-            data["classified_at"] = datetime.now().isoformat()
-            data["classification_source"] = "llm"
-            return data
+        data["classified_at"] = datetime.now().isoformat()
+        data["classification_source"] = "llm"
+        return data
 
-    with ThreadPoolExecutor(max_workers=LLM_CONCURRENCY) as executor:
+    with ThreadPoolExecutor(max_workers=min(LLM_CONCURRENCY, len(online) or 1)) as executor:
         futures = {executor.submit(classify_one, d): d for d in online}
         done = 0
         for future in as_completed(futures):
@@ -551,7 +592,7 @@ def check_amazon_presence(ecommerce_domains: List[dict], log_file: Path) -> List
 
     if to_match:
         llm_start = time.time()
-        with ThreadPoolExecutor(max_workers=LLM_MATCH_PARALLEL) as executor:
+        with ThreadPoolExecutor(max_workers=min(LLM_MATCH_PARALLEL, len(to_match) or 1)) as executor:
             futures = {executor.submit(match_one, d, r): d for d, r in to_match}
             done = 0
             for future in as_completed(futures):
@@ -570,7 +611,11 @@ def check_amazon_presence(ecommerce_domains: List[dict], log_file: Path) -> List
 # MAIN PIPELINE (API ENTRY POINT)
 # ============================================================================
 
-def run_pipeline_from_api(domain_metas: List[dict], log_file: Path) -> tuple:
+def run_pipeline_from_api(
+    domain_metas: List[dict],
+    log_file: Path,
+    progress_cb=None,
+) -> tuple:
     """
     API entry point. Accepts enriched domain dicts from StoreLeads.
     Returns (all_ecommerce_results, summary_dict).
@@ -579,11 +624,17 @@ def run_pipeline_from_api(domain_metas: List[dict], log_file: Path) -> tuple:
     log(f"Pipeline start: {total} domains (StoreLeads-enriched)", log_file)
     start_time = time.time()
 
+    def _progress(msg):
+        if progress_cb:
+            progress_cb(msg)
+
     # Phase 0: Filter obvious non-ecommerce (news, government, etc.)
+    _progress(f"Phase 0: Pre-classifying {total} domains...")
     needs_llm, filtered_out = pre_classify(domain_metas, log_file)
 
     # Phase 1: Scrape domains that need classification
     if needs_llm:
+        _progress(f"Phase 1: Scraping {len(needs_llm)} domains...")
         scraped = asyncio.run(scrape_all(needs_llm, log_file))
         online = sum(1 for s in scraped if s.get("is_online"))
         log(f"Scrape complete: {online}/{len(scraped)} online", log_file)
@@ -592,6 +643,8 @@ def run_pipeline_from_api(domain_metas: List[dict], log_file: Path) -> tuple:
 
     # Phase 2: Classify ALL scraped domains with LLM — no auto-classification
     if scraped:
+        online_count = sum(1 for s in scraped if s.get("is_online"))
+        _progress(f"Phase 2: Classifying {online_count} online domains with LLM...")
         classified = classify_batch(scraped, log_file)
         ecommerce = [d for d in classified if d.get("business_type") == "ecommerce"]
         not_ecommerce = [d for d in classified if d.get("business_type") != "ecommerce"]
@@ -608,6 +661,7 @@ def run_pipeline_from_api(domain_metas: List[dict], log_file: Path) -> tuple:
 
     # Phase 3: Amazon check for all ecommerce
     if ecommerce:
+        _progress(f"Phase 3: Checking Amazon presence for {len(ecommerce)} ecommerce domains...")
         check_amazon_presence(ecommerce, log_file)
 
     on_amazon = sum(1 for d in ecommerce if d.get("amazon_status") == "on_amazon")

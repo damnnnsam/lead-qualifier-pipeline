@@ -2,7 +2,7 @@
 """
 AI Brand Matcher
 
-Use Claude to match Amazon seller names to company/brand names.
+Use LLM to match Amazon seller names to company/brand names.
 Supports both individual requests (with retry) and batch processing.
 """
 
@@ -36,14 +36,13 @@ class BrandMatch:
 MATCH_ERROR = "MATCH_ERROR"
 
 
-# Global semaphore to limit concurrent LLM connections (avoid rate limits)
-_llm_semaphore = threading.Semaphore(int(os.environ.get("LLM_CONCURRENCY", "100")))  # Match env config
+_llm_semaphore = threading.Semaphore(int(os.environ.get("LLM_CONCURRENCY", "50")))
 
 
 class BrandMatcher:
     """Match Amazon sellers to company names using LLM provider"""
 
-    def __init__(self, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, model: str = None):
         self.llm = get_llm_client()
         self.provider = get_llm_provider_name()
         self.model = resolve_llm_model(model, provider=self.provider)
@@ -82,12 +81,16 @@ Respond with JSON only:
 Confidence: 0=no match found, 1=unlikely, 2=possible, 3=probable, 4=confident, 5=exact match."""
 
     def _parse_response(self, domain: str, company_name: str, content: str) -> Optional[BrandMatch]:
-        """Parse Claude response and extract match"""
-        json_match = re.search(r'\{[\s\S]*\}', content)
+        """Parse LLM response and extract match"""
+        cleaned = re.sub(r"```(?:json)?\s*", "", content).strip().rstrip("`")
+        json_match = re.search(r'\{[\s\S]*\}', cleaned)
         if not json_match:
             return None
 
-        result = json.loads(json_match.group())
+        try:
+            result = json.loads(json_match.group())
+        except (json.JSONDecodeError, ValueError):
+            return None
 
         if "matches" in result:
             matches = result["matches"]
@@ -130,11 +133,11 @@ Confidence: 0=no match found, 1=unlikely, 2=possible, 3=probable, 4=confident, 5
         
         for attempt in range(max_retries):
             try:
-                # Use semaphore to limit concurrent connections
                 with _llm_semaphore:
                     response = self.llm.messages.create(
                         model=self.model,
                         max_tokens=300,
+                        timeout=30,
                         messages=[{"role": "user", "content": prompt}]
                     )
                 

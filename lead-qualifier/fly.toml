@@ -8,7 +8,8 @@ app = "lead-qualifier-pipeline"
 
 [env]
   PORT = "8080"
-  LLM_CONCURRENCY = "500"
+  LLM_PROVIDER = "deepseek"
+  LLM_CONCURRENCY = "50"
   MAX_CONCURRENT_JOBS = "16"
   PYTHONUNBUFFERED = "1"
 

@@ -33,7 +33,7 @@ def _norm_domain(d: str) -> str:
     return d.split("/")[0]
 
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "750"))
-MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "8"))
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "16"))
 POLL_INTERVAL = 3
 POLL_TIMEOUT = 1200
 MAX_RETRIES = 60

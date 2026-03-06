@@ -19,8 +19,8 @@ FastAPI API (lead-qualifier/api.py) ── deployed on Fly.io
 Pipeline (lead-qualifier/pipeline.py)
  ├── Phase 0: Pre-classify using StoreLeads metadata (skip obvious non-ecom)
  ├── Phase 1: Scrape remaining domains via BrightData proxy (500 concurrent)
- ├── Phase 2: Classify with Claude LLM (enriched prompt w/ metadata)
- └── Phase 3: Amazon presence check (Serper SERP + Claude brand matching)
+ ├── Phase 2: Classify with DeepSeek LLM (enriched prompt w/ metadata)
+ └── Phase 3: Amazon presence check (Serper SERP + DeepSeek brand matching)
 ```
 
 ## Project Structure
@@ -56,13 +56,14 @@ cp lead-qualifier/.env.example lead-qualifier/.env
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Yes | Claude API access |
+| `DEEPSEEK_API_KEY` | Yes | DeepSeek API access |
 | `SERPER_API_KEY` | Yes | Serper.dev SERP search |
 | `API_KEY` | Yes | Auth token for the pipeline API |
 | `BRIGHTDATA_PROXY` | No | Proxy URL for web scraping |
-| `LLM_PROVIDER` | No | `claude` (default) or `deepseek` |
-| `LLM_CONCURRENCY` | No | Concurrent LLM calls (default: 500) |
+| `LLM_PROVIDER` | No | `deepseek` (default) or `claude` |
+| `LLM_CONCURRENCY` | No | Concurrent LLM calls (default: 50) |
 | `MAX_CONCURRENT_JOBS` | No | Max parallel pipeline jobs (default: 16) |
+| `ANTHROPIC_API_KEY` | No | Only needed if `LLM_PROVIDER=claude` |
 
 ### Local Development
 
@@ -84,7 +85,7 @@ fly deploy
 Set secrets on the Fly app:
 
 ```bash
-fly secrets set ANTHROPIC_API_KEY=sk-... SERPER_API_KEY=... API_KEY=...
+fly secrets set DEEPSEEK_API_KEY=sk-... SERPER_API_KEY=... API_KEY=...
 ```
 
 The VM is `performance-8x` / 32 GB RAM and scales to zero when idle.
@@ -160,6 +161,6 @@ Returns `{"job_id": "abc123", "domain_count": 2, "status": "running"}`.
 ## Pipeline Details
 
 - **Pre-classification** uses StoreLeads platform, categories, and product count to skip obvious non-ecom (news, government, education, etc.) without scraping or LLM calls. Never auto-classifies *as* ecommerce — all potential ecom sites go through full LLM classification.
-- **Scraping** uses aiohttp through BrightData residential proxy, 500 concurrent connections, 3 retries with exponential backoff.
-- **LLM classification** sends scraped page content + StoreLeads metadata to Claude. Classifies into: `ecommerce`, `software`, `agency`, `services`, `b2b`, `marketplace`, `manufacturer`, `media`, `real_estate`, `finance`, `education`, `nonprofit`, `other`.
-- **Amazon matching** searches Serper for `"{merchant_name}" site:amazon.com`, then uses Claude to verify the match. Confidence is 0–5; only confidence >= 2 is reported as a match.
+- **Scraping** uses aiohttp through BrightData residential proxy, 500 concurrent connections, 3 retries with exponential backoff. Response size capped at 2 MB, overall phase timeout of 10 minutes.
+- **LLM classification** sends scraped page content + StoreLeads metadata to DeepSeek (or Claude). Classifies into: `ecommerce`, `software`, `agency`, `services`, `b2b`, `marketplace`, `manufacturer`, `media`, `real_estate`, `finance`, `education`, `nonprofit`, `other`. Includes retry with exponential backoff on rate limits.
+- **Amazon matching** searches Serper for `"{merchant_name}" site:amazon.com`, then uses DeepSeek to verify the match. Confidence is 0–5; only confidence >= 2 is reported as a match. Serper calls have retry on transient errors.

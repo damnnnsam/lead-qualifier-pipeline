@@ -37,20 +37,21 @@ class SerperSearch:
                     return
             time.sleep(0.03)
     
-    def search(self, query: str, location: str = "United States") -> Dict:
+    def search(self, query: str, location: str = "United States", _retries: int = 2) -> Dict:
         """
-        Perform a single SERP search.
+        Perform a single SERP search with retry on transient errors.
         
         Args:
             query: Search query
             location: Location for search results
+            _retries: Internal retry count for transient failures
             
         Returns:
             Dict with search results
         """
         self._rate_limit()
         
-        conn = http.client.HTTPSConnection(self.host)
+        conn = http.client.HTTPSConnection(self.host, timeout=10)
         payload = json.dumps({
             "q": query,
             "location": location
@@ -66,11 +67,23 @@ class SerperSearch:
             status = res.status
             data = res.read()
             
+            if status >= 500 and _retries > 0:
+                conn.close()
+                time.sleep(1)
+                return self.search(query, location, _retries=_retries - 1)
+            
             if status != 200:
                 print(f"[Serper] HTTP {status}: {data.decode('utf-8')[:200]}")
                 return {"error": f"HTTP {status}"}
             
             return json.loads(data.decode("utf-8"))
+        except (TimeoutError, OSError, http.client.HTTPException) as e:
+            conn.close()
+            if _retries > 0:
+                time.sleep(1)
+                return self.search(query, location, _retries=_retries - 1)
+            print(f"[Serper] Exception: {e}")
+            return {"error": str(e)}
         except Exception as e:
             print(f"[Serper] Exception: {e}")
             return {"error": str(e)}

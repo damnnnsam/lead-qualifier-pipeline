@@ -18,12 +18,12 @@ DEFAULT_MODELS = {
 
 
 def get_llm_provider_name() -> str:
-    provider = (os.getenv("LLM_PROVIDER") or "claude").strip().lower()
+    provider = (os.getenv("LLM_PROVIDER") or "deepseek").strip().lower()
     if provider in ("anthropic", "claude"):
         return "claude"
     if provider in ("deepseek", "deep-seek"):
         return "deepseek"
-    return "claude"
+    return "deepseek"
 
 
 def resolve_llm_model(requested_model: Optional[str] = None, provider: Optional[str] = None) -> str:

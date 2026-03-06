@@ -34,6 +34,8 @@ API_KEY = os.getenv("API_KEY", "").strip()
 REQUIRE_API_KEY = bool(API_KEY)
 MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "16"))
 JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "1200"))
+MAX_DOMAINS_PER_REQUEST = int(os.getenv("MAX_DOMAINS_PER_REQUEST", "5000"))
+JOB_RETENTION_SECONDS = 3600  # prune completed jobs after 1 hour
 
 jobs: dict = {}
 jobs_lock = threading.Lock()
@@ -82,14 +84,34 @@ def normalize_input(raw: List[Any]) -> List[dict]:
     return out
 
 
+def _prune_old_jobs():
+    """Remove completed/errored jobs older than JOB_RETENTION_SECONDS. Must hold jobs_lock."""
+    now = time.time()
+    stale = [
+        jid for jid, j in jobs.items()
+        if j.get("status") in ("complete", "error")
+        and (now - j["created_at"]) > JOB_RETENTION_SECONDS
+    ]
+    for jid in stale:
+        del jobs[jid]
+
+
+def _set_progress(job_id: str, msg: str):
+    with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id]["progress"] = msg
+
+
 def run_pipeline_for_domains(domain_metas: List[dict], job_id: str):
     """Run the full pipeline. Updates jobs[job_id] in-place."""
     log_path = Path(tempfile.gettempdir()) / f"pipeline_{job_id}.log"
     try:
-        with jobs_lock:
-            jobs[job_id]["progress"] = "Running pipeline..."
+        _set_progress(job_id, f"Starting pipeline for {len(domain_metas)} domains...")
 
-        final, summary = run_pipeline_from_api(domain_metas, log_path)
+        def progress_cb(msg: str):
+            _set_progress(job_id, msg)
+
+        final, summary = run_pipeline_from_api(domain_metas, log_path, progress_cb=progress_cb)
 
         results = []
         for row in final:
@@ -136,11 +158,19 @@ class RunResponse(BaseModel):
 @app.post("/run", response_model=RunResponse)
 async def run(request: RunRequest, x_api_key: Optional[str] = Header(None)):
     require_api_key(x_api_key)
+
+    if len(request.domains) > MAX_DOMAINS_PER_REQUEST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many domains ({len(request.domains)}). Max is {MAX_DOMAINS_PER_REQUEST}.",
+        )
+
     domain_metas = normalize_input(request.domains)
     if not domain_metas:
         raise HTTPException(status_code=400, detail="No valid domains provided")
 
     with jobs_lock:
+        _prune_old_jobs()
         now = time.time()
         for jid, j in jobs.items():
             if j.get("status") == "running" and (now - j["created_at"]) > JOB_TIMEOUT_SECONDS:

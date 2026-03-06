@@ -4,9 +4,9 @@ uvicorn[standard]>=0.27.0
 python-dotenv>=1.0.0
 pydantic>=2.0.0
 
-# LLM (DeepSeek via OpenAI client, Anthropic for Claude)
-anthropic>=0.40.0
+# LLM (DeepSeek via OpenAI client — primary; Anthropic optional for Claude fallback)
 openai>=1.0.0
+anthropic>=0.40.0
 
 # Scraping
 aiohttp>=3.9.0
