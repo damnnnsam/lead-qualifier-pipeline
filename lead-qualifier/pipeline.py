@@ -552,7 +552,14 @@ IMPORTANT RULES:
 5. A restaurant, salon, gym, or spa is "services" even if it sells gift cards or a few products online.
 
 Respond with JSON only:
-{{"business_type": "x", "confidence": 1-3, "description": "one sentence about what this business does", "category": "product category if ecommerce, otherwise null"}}"""
+{{"business_type": "x", "confidence": 1-3, "description": "one sentence about what this business does", "niche": "their specific niche in 2-6 words", "category": "product category if ecommerce, otherwise null"}}
+
+NICHE GUIDELINES:
+- The niche should be specific enough that the business owner would immediately identify with it in a cold email.
+- BAD: "online store", "ecommerce brand", "sells products" (too generic, could be anyone)
+- GOOD: "premium organic baby skincare", "tactical outdoor gear", "handmade boho jewelry", "sustainable athleisure for women", "luxury pet accessories"
+- For non-ecommerce: "Shopify growth agency", "AI-powered inventory management", "boutique wedding photography"
+- Think: what would make them say "yes, that's exactly what I do" if you called it out in an email?"""
 
     def _extract_json(text: str) -> dict | None:
         """Extract JSON from LLM response, handling markdown fences and nested objects."""
@@ -603,6 +610,7 @@ Respond with JSON only:
                     data["business_type"] = parsed.get("business_type", "other")
                     data["classification_confidence"] = parsed.get("confidence", 1)
                     data["classification_description"] = parsed.get("description", "")
+                    data["niche"] = parsed.get("niche", "")
                     data["classification_category"] = parsed.get("category", "")
                 else:
                     data["business_type"] = "other"
