@@ -4,16 +4,15 @@
 # Source data
 storeleads_dump.sql.gz
 
-# Generated batch files, results, logs, and test artifacts
+# Generated batch inputs and results
 domains_*.json
 domains_*.csv
 results_*.jsonl
 results_*.csv
-*.csv
+
+# Logs and test artifacts
 batch*_log.txt
 test_*.json
-
-# A/B test artifacts
 ab_test/
 ab_test_*.json
 ab_test_*.jsonl

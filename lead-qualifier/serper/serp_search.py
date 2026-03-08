@@ -94,34 +94,35 @@ class SerperSearch:
         """
         Search for a domain's Amazon seller/store presence.
         
-        Uses merchant_name with site:amazon.com for accurate results.
-        Falls back to domain-based search if no merchant_name provided.
+        Runs up to two queries when merchant_name differs from the domain-derived
+        brand (e.g. "etnies US" vs "etnies"), then merges and deduplicates results.
+        This catches cases where one query variant finds results the other misses.
         """
-        if merchant_name:
-            query = f'"{merchant_name}" site:amazon.com'
-        else:
-            brand = domain.split(".")[0]
-            query = f'"{brand}" site:amazon.com'
+        brand = domain.split(".")[0]
+        brand_query = f'"{brand}" site:amazon.com'
 
-        result = self.search(query)
-        
-        if "error" in result:
-            print(f"[Serper] Error for {domain}: {result['error']}")
-            return []
-        
-        organic = result.get("organic", [])
-        
+        queries = [brand_query]
+        if merchant_name and merchant_name.strip().lower() != brand.lower():
+            queries.insert(0, f'"{merchant_name.strip()}" site:amazon.com')
+
+        seen_urls = set()
         amazon_results = []
-        for item in organic:
-            link = item.get("link", "")
-            if "amazon.com" in link.lower():
-                amazon_results.append({
-                    "url": link,
-                    "title": item.get("title", ""),
-                    "description": item.get("snippet", "")
-                })
-        
-        return amazon_results[:5]
+
+        for query in queries:
+            result = self.search(query)
+            if "error" in result:
+                continue
+            for item in result.get("organic", []):
+                link = item.get("link", "")
+                if "amazon.com" in link.lower() and link not in seen_urls:
+                    seen_urls.add(link)
+                    amazon_results.append({
+                        "url": link,
+                        "title": item.get("title", ""),
+                        "description": item.get("snippet", "")
+                    })
+
+        return amazon_results[:10]
     
     def search_batch(self, domains: List[str], merchant_names: Dict[str, str] = None, max_workers: int = 40) -> Dict[str, List[Dict]]:
         """

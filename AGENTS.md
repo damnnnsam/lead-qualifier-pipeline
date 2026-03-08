@@ -47,13 +47,14 @@ Response when complete:
       "brd_error": null,
       "classification_category": "Pet Supplies",
       "classification_description": "Online pet supply store selling food, toys, and accessories",
+      "classification_source": "llm",
       "niche": "premium pet food & accessories",
       "amazon_status": "on_amazon",
       "amazon_store_url": "https://www.amazon.com/stores/Example/page/...",
       "amazon_seller_name": "Example Pet Co",
       "amazon_confidence": 4,
       "amazon_confidence_reason": "Exact brand name match on Amazon storefront",
-      "amazon_checked_at": "2026-03-06T12:00:00"
+      "amazon_checked_at": "2026-03-08T12:00:00"
     }
   ]
 }
@@ -69,14 +70,15 @@ Response when complete:
 |---|---|---|
 | `domain` | string | The input domain |
 | `title` | string\|null | Page title from scrape |
-| `business_type` | string | One of: `ecommerce`, `software`, `agency`, `services`, `b2b`, `marketplace`, `manufacturer`, `media`, `real_estate`, `finance`, `education`, `nonprofit`, `other`, `scrape_failed`, `offline` |
+| `business_type` | string | One of: `ecommerce`, `software`, `agency`, `services`, `b2b`, `marketplace`, `manufacturer`, `media`, `real_estate`, `finance`, `education`, `nonprofit`, `other`, `not_ecommerce`, `scrape_failed` |
 | `is_online` | bool | Whether the site was reachable |
 | `scrape_error` | string\|null | Error details if scrape failed |
 | `brd_error` | string\|null | BrightData proxy error if applicable |
 | `classification_category` | string\|null | Product category (ecommerce only) |
 | `classification_description` | string | One-sentence AI-generated summary of what the business does |
+| `classification_source` | string | How the classification was made: `llm`, `storeleads_fallback`, `scrape_failed`, or `no_content` |
 | `niche` | string | Specific 2-6 word niche for email personalization (e.g. "handmade boho jewelry") |
-| `amazon_status` | string | `on_amazon`, `not_on_amazon`, or `skipped` |
+| `amazon_status` | string\|null | `on_amazon` or `ecom_only`. Only set for ecommerce domains |
 | `amazon_store_url` | string\|null | Amazon store/brand page URL |
 | `amazon_seller_name` | string\|null | Matched seller name on Amazon |
 | `amazon_confidence` | int\|null | 0-5 confidence score (only >= 2 reported as match) |
@@ -125,8 +127,11 @@ For large batches (10K+ domains), split into chunks of ~750 and submit concurren
 | `lead-qualifier/pipeline.py` | Core pipeline: scrape, classify, Amazon check |
 | `lead-qualifier/ai/llm_provider.py` | LLM client abstraction (DeepSeek/Claude) |
 | `lead-qualifier/ai/brand_matcher.py` | Amazon brand matching via LLM |
-| `lead-qualifier/serper/serp_search.py` | Serper.dev SERP API wrapper |
+| `lead-qualifier/serper/serp_search.py` | Serper.dev SERP API wrapper (dual-query) |
 | `run_api_cloud.py` | Batch client for sending domains to the API |
+| `upload_results_to_bq.py` | Uploads JSONL/CSV results to BigQuery |
+| `generate_next_batch.py` | Generates batch JSON from StoreLeads dump |
+| `compare_ab.py` | A/B test: compare old vs new pipeline results |
 
 ## Environment Variables
 
