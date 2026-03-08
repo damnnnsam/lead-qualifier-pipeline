@@ -434,21 +434,31 @@ def classify_batch(scraped_data: List[dict], log_file: Path) -> List[dict]:
     log(f"Classifying {len(online)} online sites ({LLM_CONCURRENCY} concurrent)...", log_file)
 
     error_counts = {}
+    metadata_recovered = []
     for d in offline:
         err = d.get("scrape_error", "unknown")
         brd = d.get("brd_error", "")
         error_key = err.split("(")[0].strip() if err else "unknown"
         error_counts[error_key] = error_counts.get(error_key, 0) + 1
 
-        is_proxy_issue = (
-            "proxy" in err.lower()
-            or bool(brd)
-            or err in ("http_429", "timeout", "connection_error")
-        )
-        if is_proxy_issue:
-            d["business_type"] = "scrape_failed"
-        else:
-            d["business_type"] = "offline"
+        domain = d.get("domain", "")
+        is_gov = domain.endswith(".gov") or ".gov." in domain
+        if not is_gov and _has_ecom_platform(d) and _has_products(d) and _has_revenue(d):
+            d["business_type"] = "ecommerce"
+            d["classification_confidence"] = 2
+            d["classification_description"] = (
+                f"Scrape failed ({err}), classified from StoreLeads metadata: "
+                f"platform={d.get('platform')}, products={d.get('product_count', 0)}, "
+                f"revenue=${d.get('estimated_sales_yearly', 0) or 0:,}/yr"
+            )
+            d["classification_category"] = None
+            d["classified_at"] = datetime.now().isoformat()
+            d["classification_source"] = "storeleads_fallback"
+            d["scrape_failed"] = True
+            metadata_recovered.append(d)
+            continue
+
+        d["business_type"] = "scrape_failed"
         d["classification_confidence"] = 0
         desc = f"Scrape failed: {err}"
         if brd:
@@ -456,11 +466,13 @@ def classify_batch(scraped_data: List[dict], log_file: Path) -> List[dict]:
         d["classification_description"] = desc
         d["classification_category"] = None
         d["classified_at"] = datetime.now().isoformat()
-        d["classification_source"] = "offline"
+        d["classification_source"] = "scrape_failed"
 
     if error_counts:
         err_summary = ", ".join(f"{k}: {v}" for k, v in sorted(error_counts.items(), key=lambda x: -x[1]))
         log(f"  Scrape errors: {err_summary}", log_file)
+    if metadata_recovered:
+        log(f"  StoreLeads fallback: {len(metadata_recovered)} scrape-failed domains recovered as ecommerce", log_file)
 
     semaphore = threading.Semaphore(LLM_CONCURRENCY)
 
@@ -778,6 +790,8 @@ def run_pipeline_from_api(
 
     on_amazon = sum(1 for d in ecommerce if d.get("amazon_status") == "on_amazon")
     ecom_only = sum(1 for d in ecommerce if d.get("amazon_status") == "ecom_only")
+    metadata_fallback = sum(1 for d in ecommerce if d.get("classification_source") == "storeleads_fallback")
+    scrape_failed = sum(1 for d in not_ecommerce if d.get("business_type") == "scrape_failed")
 
     all_results = ecommerce + not_ecommerce
     elapsed = time.time() - start_time
@@ -789,6 +803,8 @@ def run_pipeline_from_api(
         "not_ecommerce": len(not_ecommerce),
         "on_amazon": on_amazon,
         "ecom_only": ecom_only,
+        "metadata_fallback": metadata_fallback,
+        "scrape_failed": scrape_failed,
         "elapsed_seconds": round(elapsed, 1),
     }
     log(f"Pipeline complete in {elapsed:.1f}s: {json.dumps(summary)}", log_file)

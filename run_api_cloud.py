@@ -16,6 +16,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
+from dotenv import load_dotenv
+load_dotenv()
+
 API_URL = os.environ.get("API_URL", "https://lead-qualifier-pipeline.fly.dev")
 API_KEY = os.environ.get("API_KEY")
 if not API_KEY:
@@ -24,6 +27,7 @@ DOMAINS_FILE = os.environ.get("DOMAINS_FILE")
 RESULTS_FILE = os.environ.get("RESULTS_FILE")
 if not DOMAINS_FILE or not RESULTS_FILE:
     sys.exit("ERROR: DOMAINS_FILE and RESULTS_FILE environment variables are required.")
+UPLOAD_TO_BQ = os.environ.get("UPLOAD_TO_BQ", "").lower() in ("1", "true", "yes")
 
 
 def _norm_domain(d: str) -> str:
@@ -252,6 +256,20 @@ def main():
     elapsed = time.time() - counter["start"]
     print(f"\nFinished: {counter['done']:,} domains processed in {elapsed / 60:.1f} minutes")
     print(f"Results saved to {RESULTS_FILE}")
+
+    if UPLOAD_TO_BQ:
+        print("\nUploading results to BigQuery...")
+        try:
+            import subprocess
+            result = subprocess.run(
+                [sys.executable, "upload_results_to_bq.py", RESULTS_FILE],
+                capture_output=True, text=True,
+            )
+            print(result.stdout)
+            if result.returncode != 0:
+                print(f"BQ upload failed: {result.stderr}")
+        except Exception as e:
+            print(f"BQ upload error: {e}")
 
 
 if __name__ == "__main__":
